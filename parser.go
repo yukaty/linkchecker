@@ -4,6 +4,7 @@ package main
 import (
 	"io"
 	"net/url"
+	"regexp"
 	"strings"
 
 	"golang.org/x/net/html"
@@ -61,4 +62,74 @@ func extractLinks(body io.Reader, baseURL *url.URL) ([]string, error) {
 			}
 		}
 	}
+}
+
+// extractMarkdownLinks extracts URLs from Markdown content
+// Supports: [text](url) and bare URLs (http://... or https://...)
+// URLs are returned in order of appearance in the document
+func extractMarkdownLinks(content string) []string {
+	var urls []string
+	seen := make(map[string]bool)
+
+	// Track positions of all URL occurrences
+	type urlMatch struct {
+		url string
+		pos int
+	}
+	var allMatches []urlMatch
+
+	// Find Markdown link syntax: [text](url)
+	markdownLinkRe := regexp.MustCompile(`\[([^\]]+)\]\(([^)]+)\)`)
+	mdMatches := markdownLinkRe.FindAllStringSubmatchIndex(content, -1)
+	for _, match := range mdMatches {
+		if len(match) >= 6 {
+			link := strings.TrimSpace(content[match[4]:match[5]])
+			if strings.HasPrefix(link, "http://") || strings.HasPrefix(link, "https://") {
+				allMatches = append(allMatches, urlMatch{url: link, pos: match[0]})
+			}
+		}
+	}
+
+	// Find bare URLs (not inside markdown links)
+	// First, create a mask of positions to skip (markdown link regions)
+	skipRanges := make([][2]int, len(mdMatches))
+	for i, match := range mdMatches {
+		skipRanges[i] = [2]int{match[0], match[1]}
+	}
+
+	bareURLRe := regexp.MustCompile(`https?://[^\s<>"{}|\\^\[\]` + "`" + `()]+`)
+	bareMatches := bareURLRe.FindAllStringIndex(content, -1)
+	for _, match := range bareMatches {
+		// Check if this bare URL is inside a markdown link
+		skip := false
+		for _, skipRange := range skipRanges {
+			if match[0] >= skipRange[0] && match[1] <= skipRange[1] {
+				skip = true
+				break
+			}
+		}
+		if !skip {
+			link := strings.TrimSpace(content[match[0]:match[1]])
+			allMatches = append(allMatches, urlMatch{url: link, pos: match[0]})
+		}
+	}
+
+	// Sort by position to maintain document order
+	for i := 0; i < len(allMatches); i++ {
+		for j := i + 1; j < len(allMatches); j++ {
+			if allMatches[i].pos > allMatches[j].pos {
+				allMatches[i], allMatches[j] = allMatches[j], allMatches[i]
+			}
+		}
+	}
+
+	// Build result list, removing duplicates while preserving order
+	for _, match := range allMatches {
+		if !seen[match.url] {
+			urls = append(urls, match.url)
+			seen[match.url] = true
+		}
+	}
+
+	return urls
 }

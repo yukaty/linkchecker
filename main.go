@@ -15,48 +15,79 @@ import (
 
 func main() {
 	// define flags
-	fileFlag := flag.String("file", "", "File containing URLs to check (one per line)")
 	jsonFlag := flag.Bool("json", false, "Output results as JSON for CI/CD integration")
 	quietFlag := flag.Bool("quiet", false, "Suppress output, only show errors (useful with -json)")
 	timeoutFlag := flag.Duration("timeout", 10*time.Second, "HTTP request timeout (e.g., 10s, 30s, 1m)")
 	flag.Parse()
 
-	// get URLs from arguments or file
+	// get arguments
+	args := flag.Args()
+	if len(args) == 0 {
+		fmt.Fprintf(os.Stderr, "Usage: %s [options] <url|file> [url|file...]\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "\nArguments:\n")
+		fmt.Fprintf(os.Stderr, "  url               Direct URL (http:// or https://)\n")
+		fmt.Fprintf(os.Stderr, "  file.md           Markdown file (extracts links)\n")
+		fmt.Fprintf(os.Stderr, "  file.txt          URL list file (one URL per line)\n")
+		fmt.Fprintf(os.Stderr, "\nExamples:\n")
+		fmt.Fprintf(os.Stderr, "  %s https://example.com                    # Crawl mode (single URL)\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s https://github.com https://google.com  # Direct check mode (multiple URLs)\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s post.md                                # Check links in Markdown file\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s docs/*.md                              # Check links in multiple Markdown files\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s urls.txt                               # Check URLs from text file\n", os.Args[0])
+		os.Exit(1)
+	}
+
+	// process arguments and collect URLs
 	var urls []string
-
-	if *fileFlag != "" {
-		// read URLs from file
-		file, err := os.Open(*fileFlag)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error opening file: %v\n", err)
-			os.Exit(1)
-		}
-		defer file.Close()
-
-		scanner := bufio.NewScanner(file)
-		for scanner.Scan() {
-			line := strings.TrimSpace(scanner.Text())
-			if line != "" && !strings.HasPrefix(line, "#") {
-				urls = append(urls, line)
+	for _, arg := range args {
+		switch {
+		case strings.HasSuffix(arg, ".md"):
+			// Markdown file - extract links
+			content, err := os.ReadFile(arg)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error reading Markdown file %s: %v\n", arg, err)
+				os.Exit(1)
 			}
-		}
+			extractedURLs := extractMarkdownLinks(string(content))
+			if len(extractedURLs) == 0 {
+				fmt.Fprintf(os.Stderr, "Warning: No URLs found in %s\n", arg)
+			}
+			urls = append(urls, extractedURLs...)
 
-		if err := scanner.Err(); err != nil {
-			fmt.Fprintf(os.Stderr, "Error reading file: %v\n", err)
+		case strings.HasSuffix(arg, ".txt"):
+			// Text file - read URLs line by line
+			file, err := os.Open(arg)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error opening file %s: %v\n", arg, err)
+				os.Exit(1)
+			}
+			scanner := bufio.NewScanner(file)
+			for scanner.Scan() {
+				line := strings.TrimSpace(scanner.Text())
+				if line != "" && !strings.HasPrefix(line, "#") {
+					urls = append(urls, line)
+				}
+			}
+			file.Close()
+			if err := scanner.Err(); err != nil {
+				fmt.Fprintf(os.Stderr, "Error reading file %s: %v\n", arg, err)
+				os.Exit(1)
+			}
+
+		case strings.HasPrefix(arg, "http://") || strings.HasPrefix(arg, "https://"):
+			// Direct URL
+			urls = append(urls, arg)
+
+		default:
+			fmt.Fprintf(os.Stderr, "Error: Invalid argument '%s'\n", arg)
+			fmt.Fprintf(os.Stderr, "Expected: URL (http://...), Markdown file (.md), or URL list (.txt)\n")
 			os.Exit(1)
 		}
-	} else {
-		// get URLs from command line arguments
-		urls = flag.Args()
 	}
 
 	// validate we have at least one URL
 	if len(urls) == 0 {
-		fmt.Fprintf(os.Stderr, "Usage: %s [-file <filename>] <url> [url...]\n", os.Args[0])
-		fmt.Fprintf(os.Stderr, "\nExamples:\n")
-		fmt.Fprintf(os.Stderr, "  %s https://example.com                    # Crawl mode (single URL)\n", os.Args[0])
-		fmt.Fprintf(os.Stderr, "  %s https://github.com https://google.com  # Direct check mode (multiple URLs)\n", os.Args[0])
-		fmt.Fprintf(os.Stderr, "  %s -file links.txt                        # Check URLs from file\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "Error: No URLs to check\n")
 		os.Exit(1)
 	}
 

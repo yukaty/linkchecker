@@ -211,3 +211,97 @@ func BenchmarkExtractLinks(b *testing.B) {
 		extractLinks(reader, baseURL)
 	}
 }
+
+func TestExtractMarkdownLinks(t *testing.T) {
+	tests := []struct {
+		name     string
+		content  string
+		wantURLs []string
+	}{
+		{
+			name: "markdown link syntax",
+			content: `# My Post
+[Google](https://google.com)
+[Example](https://example.com)`,
+			wantURLs: []string{"https://google.com", "https://example.com"},
+		},
+		{
+			name: "bare URLs",
+			content: `Check out https://github.com
+Also see https://golang.org`,
+			wantURLs: []string{"https://github.com", "https://golang.org"},
+		},
+		{
+			name: "mixed markdown links and bare URLs",
+			content: `Visit [OpenAI](https://openai.com) or https://anthropic.com
+More at [GitHub](https://github.com)`,
+			wantURLs: []string{"https://openai.com", "https://anthropic.com", "https://github.com"},
+		},
+		{
+			name: "duplicate URLs",
+			content: `[Link1](https://example.com)
+[Link2](https://example.com)
+https://example.com`,
+			wantURLs: []string{"https://example.com"},
+		},
+		{
+			name:     "no URLs",
+			content:  `# Just a title\nSome plain text with no links.`,
+			wantURLs: []string{},
+		},
+		{
+			name: "ignore relative links",
+			content: `[Relative](/path/to/page)
+[Anchor](#section)
+[Absolute](https://example.com)`,
+			wantURLs: []string{"https://example.com"},
+		},
+		{
+			name: "complex markdown document",
+			content: `# Documentation
+
+## Links
+- [Go Documentation](https://golang.org/doc)
+- [Package reference](https://pkg.go.dev)
+
+Visit https://example.com for more info.
+
+## Resources
+Check [this guide](https://github.com/guide) for details.`,
+			wantURLs: []string{"https://golang.org/doc", "https://pkg.go.dev", "https://example.com", "https://github.com/guide"},
+		},
+		{
+			name: "http and https",
+			content: `[HTTP](http://example.com)
+[HTTPS](https://example.com)
+http://test.com
+https://test.org`,
+			wantURLs: []string{"http://example.com", "https://example.com", "http://test.com", "https://test.org"},
+		},
+		{
+			name: "URLs with query parameters and fragments",
+			content: `[Search](https://example.com/search?q=test)
+[Section](https://example.com/page#section)
+https://api.example.com/v1/users?id=123`,
+			wantURLs: []string{"https://example.com/search?q=test", "https://example.com/page#section", "https://api.example.com/v1/users?id=123"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractMarkdownLinks(tt.content)
+
+			if len(got) != len(tt.wantURLs) {
+				t.Errorf("extractMarkdownLinks() got %d URLs, want %d\nGot: %v\nWant: %v",
+					len(got), len(tt.wantURLs), got, tt.wantURLs)
+				return
+			}
+
+			for i, wantURL := range tt.wantURLs {
+				if got[i] != wantURL {
+					t.Errorf("extractMarkdownLinks()[%d] = %q, want %q", i, got[i], wantURL)
+				}
+			}
+		})
+	}
+}

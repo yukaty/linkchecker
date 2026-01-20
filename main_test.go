@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"errors"
@@ -310,5 +311,247 @@ func TestJSONResult_NilError(t *testing.T) {
 	// Verify error field is omitted when nil
 	if strings.Contains(string(data), "error") {
 		t.Error("Expected error field to be omitted when nil")
+	}
+}
+
+// Integration tests for file processing
+
+func TestMarkdownFileProcessing(t *testing.T) {
+	// Create a temporary Markdown file
+	content := `# Test Document
+
+Check out [Google](https://google.com) and https://github.com
+
+Also see:
+- [Example](https://example.com)
+- [Test](https://test.com)
+`
+	tmpfile, err := os.CreateTemp("", "test-*.md")
+	if err != nil {
+		t.Fatalf("Failed to create temp file: %v", err)
+	}
+	defer os.Remove(tmpfile.Name())
+
+	if _, err := tmpfile.Write([]byte(content)); err != nil {
+		t.Fatalf("Failed to write to temp file: %v", err)
+	}
+	tmpfile.Close()
+
+	// Read the file and extract URLs
+	fileContent, err := os.ReadFile(tmpfile.Name())
+	if err != nil {
+		t.Fatalf("Failed to read temp file: %v", err)
+	}
+
+	urls := extractMarkdownLinks(string(fileContent))
+
+	// Verify extracted URLs
+	expectedURLs := []string{
+		"https://google.com",
+		"https://github.com",
+		"https://example.com",
+		"https://test.com",
+	}
+
+	if len(urls) != len(expectedURLs) {
+		t.Errorf("Got %d URLs, want %d", len(urls), len(expectedURLs))
+	}
+
+	for i, expected := range expectedURLs {
+		if urls[i] != expected {
+			t.Errorf("URL[%d] = %s, want %s", i, urls[i], expected)
+		}
+	}
+}
+
+func TestTxtFileProcessing(t *testing.T) {
+	// Create a temporary text file with URLs
+	content := `# This is a comment
+https://google.com
+https://github.com
+
+# Another comment
+https://example.com
+  https://test.com
+`
+	tmpfile, err := os.CreateTemp("", "test-*.txt")
+	if err != nil {
+		t.Fatalf("Failed to create temp file: %v", err)
+	}
+	defer os.Remove(tmpfile.Name())
+
+	if _, err := tmpfile.Write([]byte(content)); err != nil {
+		t.Fatalf("Failed to write to temp file: %v", err)
+	}
+	tmpfile.Close()
+
+	// Read the file
+	file, err := os.Open(tmpfile.Name())
+	if err != nil {
+		t.Fatalf("Failed to open temp file: %v", err)
+	}
+	defer file.Close()
+
+	var urls []string
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line != "" && !strings.HasPrefix(line, "#") {
+			urls = append(urls, line)
+		}
+	}
+
+	// Verify extracted URLs
+	expectedURLs := []string{
+		"https://google.com",
+		"https://github.com",
+		"https://example.com",
+		"https://test.com",
+	}
+
+	if len(urls) != len(expectedURLs) {
+		t.Errorf("Got %d URLs, want %d", len(urls), len(expectedURLs))
+	}
+
+	for i, expected := range expectedURLs {
+		if urls[i] != expected {
+			t.Errorf("URL[%d] = %s, want %s", i, urls[i], expected)
+		}
+	}
+}
+
+func TestMarkdownFileWithNoURLs(t *testing.T) {
+	content := `# Test Document
+
+Just some text with no URLs.
+
+[Relative Link](/path/to/page)
+[Anchor](#section)
+`
+	tmpfile, err := os.CreateTemp("", "test-*.md")
+	if err != nil {
+		t.Fatalf("Failed to create temp file: %v", err)
+	}
+	defer os.Remove(tmpfile.Name())
+
+	if _, err := tmpfile.Write([]byte(content)); err != nil {
+		t.Fatalf("Failed to write to temp file: %v", err)
+	}
+	tmpfile.Close()
+
+	fileContent, err := os.ReadFile(tmpfile.Name())
+	if err != nil {
+		t.Fatalf("Failed to read temp file: %v", err)
+	}
+
+	urls := extractMarkdownLinks(string(fileContent))
+
+	if len(urls) != 0 {
+		t.Errorf("Expected 0 URLs, got %d: %v", len(urls), urls)
+	}
+}
+
+func TestTxtFileWithEmptyLines(t *testing.T) {
+	content := `
+
+https://google.com
+
+
+https://github.com
+
+`
+	tmpfile, err := os.CreateTemp("", "test-*.txt")
+	if err != nil {
+		t.Fatalf("Failed to create temp file: %v", err)
+	}
+	defer os.Remove(tmpfile.Name())
+
+	if _, err := tmpfile.Write([]byte(content)); err != nil {
+		t.Fatalf("Failed to write to temp file: %v", err)
+	}
+	tmpfile.Close()
+
+	file, err := os.Open(tmpfile.Name())
+	if err != nil {
+		t.Fatalf("Failed to open temp file: %v", err)
+	}
+	defer file.Close()
+
+	var urls []string
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line != "" && !strings.HasPrefix(line, "#") {
+			urls = append(urls, line)
+		}
+	}
+
+	expectedURLs := []string{
+		"https://google.com",
+		"https://github.com",
+	}
+
+	if len(urls) != len(expectedURLs) {
+		t.Errorf("Got %d URLs, want %d", len(urls), len(expectedURLs))
+	}
+}
+
+func TestMarkdownFileWithComplexFormatting(t *testing.T) {
+	content := `# API Documentation
+
+## Endpoints
+
+### User API
+Base URL: https://api.example.com/v1
+
+- GET /users - [Documentation](https://docs.example.com/users)
+- POST /users - Create user
+
+### Authentication
+Use OAuth2: https://oauth.example.com
+
+Code example:
+` + "```" + `
+curl https://api.example.com/login
+` + "```" + `
+
+Also check https://github.com/example/api for more.
+`
+	tmpfile, err := os.CreateTemp("", "test-*.md")
+	if err != nil {
+		t.Fatalf("Failed to create temp file: %v", err)
+	}
+	defer os.Remove(tmpfile.Name())
+
+	if _, err := tmpfile.Write([]byte(content)); err != nil {
+		t.Fatalf("Failed to write to temp file: %v", err)
+	}
+	tmpfile.Close()
+
+	fileContent, err := os.ReadFile(tmpfile.Name())
+	if err != nil {
+		t.Fatalf("Failed to read temp file: %v", err)
+	}
+
+	urls := extractMarkdownLinks(string(fileContent))
+
+	// Verify we extracted the important URLs
+	expectedURLs := map[string]bool{
+		"https://api.example.com/v1":   true,
+		"https://docs.example.com/users": true,
+		"https://oauth.example.com":    true,
+		"https://api.example.com/login": true,
+		"https://github.com/example/api": true,
+	}
+
+	for _, url := range urls {
+		if !expectedURLs[url] {
+			t.Errorf("Unexpected URL: %s", url)
+		}
+		delete(expectedURLs, url)
+	}
+
+	if len(expectedURLs) > 0 {
+		t.Errorf("Missing URLs: %v", expectedURLs)
 	}
 }
