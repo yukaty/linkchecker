@@ -1,137 +1,181 @@
+// main.go - CLI entry point
 package main
 
 import (
+	"bufio"
+	"encoding/json"
+	"flag"
 	"fmt"
-	"io"
 	"net/http"
-	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"time"
-
-	"golang.org/x/net/html"
 )
 
-// checkURL checks if a URL is accessible and returns status code
-func checkURL(client *http.Client, targetURL string) (int, error) {
-	resp, err := client.Get(targetURL)
-	if err != nil {
-		return 0, err
-	}
-	defer resp.Body.Close()
-	return resp.StatusCode, nil
-}
-
-// extractLinks extracts all links from HTML
-func extractLinks(body io.Reader, baseURL *url.URL) ([]string, error) {
-	var links []string
-	tokenizer := html.NewTokenizer(body)
-
-	for {
-		tokenType := tokenizer.Next()
-		switch tokenType {
-		case html.ErrorToken:
-			err := tokenizer.Err()
-			if err == io.EOF {
-				return links, nil
-			}
-			return links, err
-
-		case html.StartTagToken, html.SelfClosingTagToken:
-			token := tokenizer.Token()
-			if token.Data == "a" {
-				for _, attr := range token.Attr {
-					if attr.Key == "href" {
-						link := attr.Val
-						// skip empty, anchors, and non-http links
-						if link == "" || link == "#" || strings.HasPrefix(link, "#") ||
-							strings.HasPrefix(link, "javascript:") ||
-							strings.HasPrefix(link, "mailto:") {
-							continue
-						}
-
-						// resolve relative URLs
-						parsedLink, err := url.Parse(link)
-						if err != nil {
-							continue
-						}
-						absoluteURL := baseURL.ResolveReference(parsedLink)
-						links = append(links, absoluteURL.String())
-						break
-					}
-				}
-			}
-		}
-	}
-}
-
 func main() {
-	// check command line arguments
-	if len(os.Args) < 2 {
-		fmt.Fprintf(os.Stderr, "Usage: %s <url>\n", os.Args[0])
-		os.Exit(1)
-	}
+	// define flags
+	fileFlag := flag.String("file", "", "File containing URLs to check (one per line)")
+	jsonFlag := flag.Bool("json", false, "Output results as JSON for CI/CD integration")
+	quietFlag := flag.Bool("quiet", false, "Suppress output, only show errors (useful with -json)")
+	timeoutFlag := flag.Duration("timeout", 10*time.Second, "HTTP request timeout (e.g., 10s, 30s, 1m)")
+	flag.Parse()
 
-	startURL := os.Args[1]
+	// get URLs from arguments or file
+	var urls []string
 
-	// parse base URL
-	baseURL, err := url.Parse(startURL)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Invalid URL: %v\n", err)
-		os.Exit(1)
-	}
-
-	// create HTTP client with timeout
-	client := &http.Client{
-		Timeout: 10 * time.Second,
-	}
-
-	fmt.Printf("Checking: %s\n", startURL)
-
-	// get the page
-	resp, err := client.Get(startURL)
-	if err != nil {
-		fmt.Printf("✗ Error: %v\n", err)
-		os.Exit(1)
-	}
-	defer resp.Body.Close()
-
-	// check status of start URL
-	if resp.StatusCode >= 400 {
-		fmt.Printf("✗ [%d] BROKEN\n", resp.StatusCode)
-		os.Exit(1)
-	}
-	fmt.Printf("✓ [%d] OK\n", resp.StatusCode)
-
-	// extract links
-	links, err := extractLinks(resp.Body, baseURL)
-	if err != nil {
-		fmt.Printf("Error extracting links: %v\n", err)
-		os.Exit(1)
-	}
-
-	fmt.Printf("\nFound %d links. Checking...\n\n", len(links))
-
-	// check each link
-	brokenCount := 0
-	for _, link := range links {
-		status, err := checkURL(client, link)
+	if *fileFlag != "" {
+		// read URLs from file
+		file, err := os.Open(*fileFlag)
 		if err != nil {
-			fmt.Printf("✗ [error] %s - %v\n", link, err)
+			fmt.Fprintf(os.Stderr, "Error opening file: %v\n", err)
+			os.Exit(1)
+		}
+		defer file.Close()
+
+		scanner := bufio.NewScanner(file)
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			if line != "" && !strings.HasPrefix(line, "#") {
+				urls = append(urls, line)
+			}
+		}
+
+		if err := scanner.Err(); err != nil {
+			fmt.Fprintf(os.Stderr, "Error reading file: %v\n", err)
+			os.Exit(1)
+		}
+	} else {
+		// get URLs from command line arguments
+		urls = flag.Args()
+	}
+
+	// validate we have at least one URL
+	if len(urls) == 0 {
+		fmt.Fprintf(os.Stderr, "Usage: %s [-file <filename>] <url> [url...]\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "\nExamples:\n")
+		fmt.Fprintf(os.Stderr, "  %s https://example.com                    # Crawl mode (single URL)\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s https://github.com https://google.com  # Direct check mode (multiple URLs)\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s -file links.txt                        # Check URLs from file\n", os.Args[0])
+		os.Exit(1)
+	}
+
+	// create HTTP client with configurable timeout
+	client := &http.Client{
+		Timeout: *timeoutFlag,
+	}
+
+	var results []LinkResult
+
+	// mode detection
+	if len(urls) == 1 {
+		// single URL - crawl mode
+		startURL := urls[0]
+		if !*quietFlag {
+			fmt.Printf("🔍 Crawling: %s (depth: %d)\n\n", startURL, maxDepth)
+		}
+
+		visited := &SafeUrlMap{visited: make(map[string]bool)}
+		var resultsMu sync.Mutex
+		var wg sync.WaitGroup
+
+		wg.Add(1)
+		go crawl(client, startURL, "", startURL, 0, visited, &results, &resultsMu, &wg)
+		wg.Wait()
+	} else {
+		// multiple URLs - direct check mode
+		if !*quietFlag {
+			fmt.Printf("🔍 Checking %d URLs...\n\n", len(urls))
+		}
+		results = checkURLs(client, urls)
+	}
+
+	// display results
+	brokenCount := 0
+	for _, result := range results {
+		if result.IsBroken {
 			brokenCount++
-		} else if status >= 400 {
-			fmt.Printf("✗ [%d] %s\n", status, link)
-			brokenCount++
-		} else {
-			fmt.Printf("✓ [%d] %s\n", status, link)
 		}
 	}
 
-	// summary
-	fmt.Printf("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
-	fmt.Printf("Summary: %d checked, %d broken\n", len(links), brokenCount)
+	if *jsonFlag {
+		// JSON output for CI/CD integration
+		outputJSON(results, brokenCount)
+	} else {
+		// Human-readable output
+		outputHuman(results, brokenCount, *quietFlag)
+	}
 
 	if brokenCount > 0 {
 		os.Exit(1)
+	}
+}
+
+// outputJSON outputs results in JSON format for CI/CD integration
+func outputJSON(results []LinkResult, brokenCount int) {
+	jsonResults := make([]JSONResult, len(results))
+	for i, result := range results {
+		var errStr *string
+		if result.Error != nil {
+			s := result.Error.Error()
+			errStr = &s
+		}
+
+		jsonResults[i] = JSONResult{
+			URL:       result.URL,
+			Status:    result.Status,
+			Error:     errStr,
+			Broken:    result.IsBroken,
+			SourceURL: result.SourceURL,
+		}
+	}
+
+	output := JSONOutput{
+		Summary: JSONSummary{
+			Total:   len(results),
+			Broken:  brokenCount,
+			Success: len(results) - brokenCount,
+		},
+		Results: jsonResults,
+	}
+
+	encoder := json.NewEncoder(os.Stdout)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(output); err != nil {
+		fmt.Fprintf(os.Stderr, "Error encoding JSON: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// outputHuman outputs results in human-readable format
+func outputHuman(results []LinkResult, brokenCount int, quiet bool) {
+	if !quiet {
+		fmt.Println("Results:")
+		fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	}
+
+	for _, result := range results {
+		if result.IsBroken {
+			if result.Error != nil {
+				fmt.Printf("✗ [error] %s\n", result.URL)
+				if result.SourceURL != "" {
+					fmt.Printf("  └─ Source: %s\n", result.SourceURL)
+				}
+				fmt.Printf("  └─ Error: %v\n", result.Error)
+			} else {
+				fmt.Printf("✗ [%d] %s\n", result.Status, result.URL)
+				if result.SourceURL != "" {
+					fmt.Printf("  └─ Source: %s\n", result.SourceURL)
+				}
+			}
+			fmt.Println()
+		} else if !quiet {
+			fmt.Printf("✓ [%d] %s\n", result.Status, result.URL)
+		}
+	}
+
+	if !quiet {
+		fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+		fmt.Printf("Summary: %d checked, %d broken\n", len(results), brokenCount)
 	}
 }
